@@ -1,0 +1,15 @@
+services:
+  api:
+    build:
+      context: ./backend
+    container_name: securegym-api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - securegym-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  securegym-data:
