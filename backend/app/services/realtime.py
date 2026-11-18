@@ -1,5 +1,4 @@
-import asyncio
-
+from anyio.from_thread import run as run_from_thread
 from fastapi import WebSocket
 
 _connections: set[WebSocket] = set()
@@ -26,9 +25,7 @@ async def broadcast_event(payload: dict) -> None:
 
 
 def publish_event(payload: dict) -> None:
-    """Schedule event delivery when called from an async request context."""
     try:
-        loop = asyncio.get_running_loop()
+        run_from_thread(broadcast_event, payload)
     except RuntimeError:
         return
-    loop.create_task(broadcast_event(payload))
