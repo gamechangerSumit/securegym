@@ -9,6 +9,7 @@ from app.models import Camera, Incident, MemberSession, Zone
 from app.schemas.camera import CameraCreate, CameraRead, ZoneCreate, ZoneRead
 from app.schemas.incident import DashboardSummary, IncidentRead, IncidentResolve
 from app.schemas.member import ManualAttribution, MemberSessionCreate
+from app.services.realtime import connect, disconnect
 
 router = APIRouter()
 
@@ -201,10 +202,10 @@ def dashboard_summary(db: Session = Depends(get_db)):
 
 @router.websocket("/ws/events")
 async def incident_events(websocket: WebSocket):
-    await websocket.accept()
+    await connect(websocket)
     try:
         await websocket.send_json({"type": "connection", "status": "connected"})
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        return
+        disconnect(websocket)
