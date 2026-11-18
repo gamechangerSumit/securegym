@@ -3,6 +3,16 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+DEFAULT_EQUIPMENT_CLASSES = [
+    "dumbbell",
+    "weight_plate",
+    "barbell",
+    "kettlebell",
+    "cable_attachment",
+    "other_equipment",
+]
+
+
 class CameraCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     stream_url: str = Field(min_length=8, max_length=1000)
@@ -34,8 +44,8 @@ class ZoneCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     zone_type: str = Field(pattern="^(storage|monitored)$")
     polygon: list[tuple[float, float]] = Field(min_length=3)
-    equipment_classes: list[str] = Field(default_factory=list)
-    dwell_seconds: int = Field(default=120, ge=5, le=86400)
+    equipment_classes: list[str] = Field(default_factory=lambda: DEFAULT_EQUIPMENT_CLASSES.copy())
+    dwell_seconds: int = Field(default=300, ge=5, le=86400)
     confidence_threshold: float = Field(default=0.45, ge=0.05, le=0.99)
 
     @field_validator("polygon")
