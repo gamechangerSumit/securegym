@@ -1,14 +1,17 @@
 # SecureGym — AI-powered gym equipment monitoring
 
-SecureGym monitors authorised gym CCTV streams for equipment left outside configured storage zones, records evidence and alerts staff.
+SecureGym is designed to work with **multiple CCTV brands**, provided the recorder/camera exposes a standard, authorised video stream. It monitors configured gym zones for equipment left outside storage, records evidence and alerts staff.
 
-> Detection is assistive, not infallible. Gym equipment classes need validation or fine-tuning against footage from the target gym. The initial backend separates camera ingestion, detection, incident rules and notifications so a validated model can be integrated safely.
+> Detection is assistive, not infallible. Gym equipment classes need validation or fine-tuning against footage from the target gym.
 >
 > Identity limitation: a camera track ID is not a member identity. SecureGym does not identify people by face. Member attribution is either a consent-based check-in/session candidate requiring trainer verification, or a trainer's explicit manual verification. Otherwise the incident remains Unknown.
 
 ## Current MVP foundation
 
 - Camera registry; streams are disabled until explicitly enabled.
+- Vendor-neutral camera source adapter: RTSP, RTSPS, HTTP and HTTPS.
+- FFmpeg-first/OpenCV automatic-backend fallback for compatible streams.
+- Reconnecting camera worker with bounded exponential backoff and configurable frame sampling.
 - Storage zones with normalised polygon coordinates.
 - Persistent dwell tracking; default alert threshold is **300 seconds (5 minutes)**.
 - Configurable equipment classes: dumbbell, weight plate, barbell, kettlebell, cable attachment and other equipment.
@@ -17,14 +20,25 @@ SecureGym monitors authorised gym CCTV streams for equipment left outside config
 - Dashboard WebSocket event with buzzer flag.
 - Optional SMTP email notification.
 - Consent-gated member session records and trainer attribution endpoint.
-- Session candidate matching is never treated as proof; trainer verification is required.
+
+## Camera compatibility
+
+SecureGym does not hard-code a single manufacturer URL pattern. It can consume standard stream URLs exposed by many Hikvision, Dahua, CP Plus and other compatible devices. Compatibility depends on the exact camera/NVR model, firmware, enabled protocols, network access and account permissions.
+
+Supported input schemes:
+- `rtsp://` and `rtsps://`
+- `http://` and `https://` when the device exposes a compatible video stream
+
+The adapter tries OpenCV's FFmpeg backend first and then its automatic backend. ONVIF discovery and automatic stream-URI retrieval are a separate integration step; not every recorder exposes ONVIF or RTSP. Proprietary-only devices may need a vendor SDK or a recorder-side stream bridge.
 
 ## Architecture
 
 ```text
-Existing IP CCTV (RTSP/ONVIF)
+Existing IP CCTV / DVR / NVR
           |
-Camera Adapter (OpenCV worker)
+Standard RTSP / RTSPS / HTTP(S) stream
+          |
+Vendor-neutral FFmpeg/OpenCV camera adapter
           |
 Gym-trained detector + object tracker
           |
@@ -40,9 +54,9 @@ Evidence snapshot + incident
 
 - Python 3.12, FastAPI, Pydantic Settings
 - SQLAlchemy 2; SQLite locally, PostgreSQL through DATABASE_URL
-- OpenCV camera adapter
+- OpenCV camera adapter (optional install)
 - Optional Ultralytics YOLO adapter
-- Docker Compose
+- Docker Compose for the API
 
 ## Quick start
 
@@ -60,19 +74,20 @@ cd backend
 python -m venv .venv
 # Windows: .venv\\Scripts\\activate
 # Linux/macOS: source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e '.[dev,camera]'
 uvicorn app.main:app --reload
 ```
 
+For the optional YOLO adapter, install `pip install -e '.[vision]` and configure a gym-validated model path. A generic pretrained model is not guaranteed to recognise gym equipment.
+
 ## CCTV setup
 
-Camera type is currently unknown for the target gym. First identify the DVR/NVR brand and model, then confirm whether it exposes an authorised RTSP stream or ONVIF. For 4–8 cameras, start by testing one stream and then add cameras incrementally.
-
-1. Ask the gym owner/admin for authorised DVR/NVR access.
-2. Find the recorder model and stream URL format; do not guess credentials or expose them in source control.
-3. Create a camera using POST /api/v1/cameras. Camera remains disabled by default.
-4. Add a storage zone using POST /api/v1/zones. Polygon coordinates are normalised from 0 to 1.
-5. Enable a camera using POST /api/v1/cameras/{id}/enable only after the stream is verified.
+1. Get permission and stream credentials from the gym owner/admin. Do not send passwords in chat or commit them to Git.
+2. Find the DVR/NVR local IP address and enable RTSP (and ONVIF if supported) in its settings.
+3. Create a camera using POST /api/v1/cameras with the stream URL supplied by the recorder's own documentation/configuration.
+4. Test one camera stream first, then add cameras incrementally up to the planned 4–8.
+5. Add a storage zone using POST /api/v1/zones. Polygon coordinates are normalised from 0 to 1.
+6. Enable a camera using POST /api/v1/cameras/{id}/enable only after the stream is verified.
 
 Example camera:
 
@@ -83,6 +98,8 @@ Example camera:
   "location": "Free weights"
 }
 ```
+
+Do not assume the example path works on every recorder. Use the exact RTSP URL provided by that device. Keep the URL and credentials in local environment/secrets storage.
 
 ## Equipment dwell rule
 
@@ -96,13 +113,13 @@ The observation ingest contract is POST /api/v1/observations. It expects a worke
 - observed_at_epoch (UTC Unix timestamp)
 - optional base64 JPEG evidence frame
 
-**Integration status:** the observation-to-incident service and dwell-state persistence are implemented. The current OpenCV worker is still a worker boundary and does not yet calculate zone membership, emit observations or supervise reconnects. Do not treat camera monitoring as live until that adapter is completed and tested against the actual NVR.
+**Integration status:** the observation-to-incident service and dwell-state persistence are implemented. The camera source adapter and reconnecting frame worker are now present, but the worker is not yet wired to zone geometry, observation ingestion, camera health persistence or a production supervisor. Do not treat monitoring as live until that pipeline is connected and tested against the actual recorder.
 
 ## Notifications
 
 - Dashboard buzzer: connect to WS /api/v1/ws/events and play an audible alert when an equipment_incident event arrives with buzzer=true.
 - Email: configure SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD and ALERT_EMAIL_TO in .env.
-- Mobile: the API event can feed a responsive dashboard/PWA. Native browser push subscriptions and service-worker delivery are not implemented yet.
+- Mobile: native/browser push subscriptions and service-worker delivery are not implemented yet.
 
 ## Member attribution
 
@@ -130,13 +147,14 @@ No facial recognition is included. Track IDs are temporary and may change after 
 
 ## Remaining implementation before production
 
-1. Discover and validate the actual DVR/NVR streams for all 4–8 cameras.
-2. Implement the complete camera supervisor, reconnect/backoff, frame sampling and observation emitter.
-3. Train/validate a gym-specific model for dumbbells, plates, barbells, kettlebells and cable attachments.
-4. Add secure staff authentication, roles and evidence access control.
-5. Build the frontend dashboard, audible buzzer and mobile PWA push notifications.
-6. Add integration tests, migrations, alert delivery monitoring and retention cleanup.
-7. Pilot one camera during busy and quiet hours; measure false positives before enabling all cameras.
+1. Add ONVIF discovery and automatic stream URI retrieval for recorders that support it.
+2. Wire the frame worker to zone geometry, object tracking and the observation API.
+3. Add a production worker supervisor and camera health reporting for all configured streams.
+4. Train/validate a gym-specific model for dumbbells, plates, barbells, kettlebells and cable attachments.
+5. Add secure staff authentication, roles and evidence access control.
+6. Build the frontend dashboard, audible buzzer and mobile PWA push notifications.
+7. Add integration tests, migrations, alert delivery monitoring and retention cleanup.
+8. Pilot one camera during busy and quiet hours; measure false positives before enabling all cameras.
 
 ## License
 
