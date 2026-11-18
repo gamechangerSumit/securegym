@@ -4,7 +4,20 @@ SecureGym monitors authorised gym CCTV streams for equipment left outside config
 
 > Detection is assistive, not infallible. Gym equipment classes need validation or fine-tuning against footage from the target gym. The initial backend separates camera ingestion, detection, incident rules and notifications so a validated model can be integrated safely.
 >
-> Identity limitation: a camera track ID is not a member identity. SecureGym does not identify people by face. Member attribution is only possible through an approved, consent-based member-session integration with sufficiently reliable correlation. Otherwise the incident remains Unknown.
+> Identity limitation: a camera track ID is not a member identity. SecureGym does not identify people by face. Member attribution is either a consent-based check-in/session candidate requiring trainer verification, or a trainer's explicit manual verification. Otherwise the incident remains Unknown.
+
+## Current MVP foundation
+
+- Camera registry; streams are disabled until explicitly enabled.
+- Storage zones with normalised polygon coordinates.
+- Persistent dwell tracking; default alert threshold is **300 seconds (5 minutes)**.
+- Configurable equipment classes: dumbbell, weight plate, barbell, kettlebell, cable attachment and other equipment.
+- Incident creation, deduplication, acknowledgement and resolution.
+- Optional JPEG evidence storage.
+- Dashboard WebSocket event with buzzer flag.
+- Optional SMTP email notification.
+- Consent-gated member session records and trainer attribution endpoint.
+- Session candidate matching is never treated as proof; trainer verification is required.
 
 ## Architecture
 
@@ -13,26 +26,15 @@ Existing IP CCTV (RTSP/ONVIF)
           |
 Camera Adapter (OpenCV worker)
           |
-Detector + tracker (gym-validated YOLO model)
+Gym-trained detector + object tracker
           |
-Zone & dwell-time rule engine
-          +----> Evidence snapshots / optional clips
+Storage-zone geometry + persistent 5-minute dwell state
           |
-Incident API + PostgreSQL/SQLite
-          +----> WebSocket dashboard
-          +----> Email / Telegram / push adapter
-          +----> Audit history & resolution
+Evidence snapshot + incident
+          +----> WebSocket dashboard event / buzzer
+          +----> SMTP email
+          +----> Trainer/member-session verification
 ```
-
-## MVP capabilities
-
-- Camera registry and health status.
-- Configurable monitored zones and equipment storage zones.
-- Incident creation when an item remains outside its home zone beyond a configured dwell threshold.
-- Evidence metadata: camera, timestamps, equipment class, confidence and snapshot path.
-- Incident acknowledgement and resolution.
-- Console notification adapter by default; external alert providers can be configured.
-- Unknown attribution unless trusted member-session integration is configured.
 
 ## Stack
 
@@ -62,55 +64,80 @@ pip install -e '.[dev]'
 uvicorn app.main:app --reload
 ```
 
-## Configure CCTV
+## CCTV setup
 
-1. Confirm the camera/NVR exposes an authorised RTSP stream (or use ONVIF discovery to obtain it).
-2. Store stream credentials in a secret manager or local .env; never commit credentials or expose them in frontend code/logs.
-3. Create a camera through POST /api/v1/cameras.
-4. Add zones with POST /api/v1/zones. Polygon points are normalised coordinates between 0 and 1.
-5. Test connectivity and retention policy before starting workers. Cameras are created disabled by default.
+Camera type is currently unknown for the target gym. First identify the DVR/NVR brand and model, then confirm whether it exposes an authorised RTSP stream or ONVIF. For 4–8 cameras, start by testing one stream and then add cameras incrementally.
 
-Example camera payload:
+1. Ask the gym owner/admin for authorised DVR/NVR access.
+2. Find the recorder model and stream URL format; do not guess credentials or expose them in source control.
+3. Create a camera using POST /api/v1/cameras. Camera remains disabled by default.
+4. Add a storage zone using POST /api/v1/zones. Polygon coordinates are normalised from 0 to 1.
+5. Enable a camera using POST /api/v1/cameras/{id}/enable only after the stream is verified.
+
+Example camera:
 
 ```json
 {
   "name": "Main dumbbell area",
   "stream_url": "rtsp://USER:PASSWORD@CAMERA_HOST:554/stream1",
-  "location": "Free weights",
-  "enabled": false
+  "location": "Free weights"
 }
 ```
 
-## Detection strategy and limits
+## Equipment dwell rule
 
-The initial code includes a detector protocol, a safe no-op default and an optional Ultralytics adapter. Generic pretrained weights are not claimed to detect gym equipment reliably. Before production, collect authorised representative day/night footage, label dumbbells/plates/kettlebells/barbells, train and validate on held-out footage, measure per-class false positives/negatives, and calibrate zones and dwell thresholds. Do not alert on a single frame; require persistence and deduplicate incidents.
+Each configured storage zone defaults to 300 seconds. The vision worker must send repeated observations for the same camera, zone, equipment class and track. The state is persisted; a gap longer than the allowed observation interval restarts the dwell clock. A single detection frame must never trigger an incident.
 
-## Identity, privacy and retention
+The observation ingest contract is POST /api/v1/observations. It expects a worker to supply:
+- camera_id and zone_id
+- equipment_class and optional track_id
+- confidence
+- outside_storage boolean
+- observed_at_epoch (UTC Unix timestamp)
+- optional base64 JPEG evidence frame
 
-- No face recognition is included.
-- Track IDs are temporary and may change after occlusion or stream restart.
-- Do not blame a member based only on proximity.
-- Add member-session correlation only with gym approval, appropriate notice/consent, access controls and audit trail.
-- Restrict evidence access and configure retention; mask irrelevant areas.
+**Integration status:** the observation-to-incident service and dwell-state persistence are implemented. The current OpenCV worker is still a worker boundary and does not yet calculate zone membership, emit observations or supervise reconnects. Do not treat camera monitoring as live until that adapter is completed and tested against the actual NVR.
 
-## Initial API
+## Notifications
+
+- Dashboard buzzer: connect to WS /api/v1/ws/events and play an audible alert when an equipment_incident event arrives with buzzer=true.
+- Email: configure SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD and ALERT_EMAIL_TO in .env.
+- Mobile: the API event can feed a responsive dashboard/PWA. Native browser push subscriptions and service-worker delivery are not implemented yet.
+
+## Member attribution
+
+- Create a member session through POST /api/v1/member-sessions with consent_recorded=true.
+- Ask the system for a candidate through POST /api/v1/incidents/{id}/attribute/session-candidate. It only proposes a match if exactly one consented session is active for that camera and event timestamp.
+- A trainer can explicitly verify a member using POST /api/v1/incidents/{id}/attribute/manual with member_id and a verification note.
+- Multiple/no session candidates remain Unknown. A possible session candidate is not proof that the member left the equipment.
+
+No facial recognition is included. Track IDs are temporary and may change after occlusion or stream restart. Restrict evidence access, set retention, provide appropriate notices and mask irrelevant areas.
+
+## API
 
 - GET /health
 - POST/GET /api/v1/cameras
+- POST /api/v1/cameras/{id}/enable and /disable
 - POST/GET /api/v1/zones
+- POST /api/v1/observations
 - GET /api/v1/incidents
-- POST /api/v1/incidents/{id}/acknowledge
-- POST /api/v1/incidents/{id}/resolve
+- POST /api/v1/incidents/{id}/acknowledge and /resolve
+- POST /api/v1/incidents/{id}/attribute/session-candidate
+- POST /api/v1/incidents/{id}/attribute/manual
+- POST /api/v1/member-sessions
 - GET /api/v1/dashboard/summary
 - WS /api/v1/ws/events
 
-## Roadmap
+## Remaining implementation before production
 
-1. Foundation: API, persistence, incident lifecycle, detector boundary and tests.
-2. Camera connectivity: RTSP reader, reconnect/backoff and health metrics.
-3. Vision: gym dataset, trained model, tracking and calibrated storage zones.
-4. Alerts: Telegram/email/push, escalation, quiet hours and deduplication.
-5. Dashboard: camera health, live incidents, evidence review and audit.
-6. Optional member-session correlation with confidence gating.
+1. Discover and validate the actual DVR/NVR streams for all 4–8 cameras.
+2. Implement the complete camera supervisor, reconnect/backoff, frame sampling and observation emitter.
+3. Train/validate a gym-specific model for dumbbells, plates, barbells, kettlebells and cable attachments.
+4. Add secure staff authentication, roles and evidence access control.
+5. Build the frontend dashboard, audible buzzer and mobile PWA push notifications.
+6. Add integration tests, migrations, alert delivery monitoring and retention cleanup.
+7. Pilot one camera during busy and quiet hours; measure false positives before enabling all cameras.
 
-License to be selected by repository owner before public distribution.
+## License
+
+To be selected by the repository owner before public distribution.
