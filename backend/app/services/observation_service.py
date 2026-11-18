@@ -1,7 +1,9 @@
-import base64
+from datetime import datetime, timezone
+
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Camera, Zone
+from app.models import Camera, EquipmentPresence, Zone
 from app.models.incident import Incident
 from app.schemas.incident_observation import EquipmentObservation
 from app.services.evidence import save_jpeg_evidence
@@ -12,7 +14,7 @@ notifications = NotificationService()
 
 
 def process_observation(db: Session, observation: EquipmentObservation) -> tuple[Incident | None, bool]:
-    """Apply configured thresholds, record evidence and alert on new misplaced equipment."""
+    """Require continuous sightings for the configured dwell period before alerting."""
     camera = db.get(Camera, observation.camera_id)
     zone = db.get(Zone, observation.zone_id)
     if camera is None or zone is None or zone.camera_id != observation.camera_id:
@@ -21,11 +23,52 @@ def process_observation(db: Session, observation: EquipmentObservation) -> tuple
         return None, False
     if zone.zone_type != "storage":
         raise ValueError("Observation zone must be a storage zone")
+
+    track_key = observation.track_id or "untracked"
+    query = select(EquipmentPresence).where(
+        EquipmentPresence.camera_id == camera.id,
+        EquipmentPresence.zone_id == zone.id,
+        EquipmentPresence.equipment_class == observation.equipment_class,
+        EquipmentPresence.track_id == track_key,
+    )
+    presence = db.scalar(query)
+    observed_at = datetime.fromtimestamp(observation.observed_at_epoch, tz=timezone.utc)
+
     if not observation.outside_storage:
+        if presence:
+            db.delete(presence)
+            db.commit()
         return None, False
+
     if observation.confidence < zone.confidence_threshold:
         return None, False
     if zone.equipment_classes and observation.equipment_class not in zone.equipment_classes:
+        return None, False
+
+    if presence is None:
+        presence = EquipmentPresence(
+            camera_id=camera.id,
+            zone_id=zone.id,
+            equipment_class=observation.equipment_class,
+            track_id=track_key,
+            first_outside_at=observed_at,
+            last_seen_at=observed_at,
+        )
+        db.add(presence)
+        db.commit()
+        db.refresh(presence)
+        return None, False
+
+    # A long gap means the track was not continuously observed; restart its dwell clock.
+    gap_seconds = (observed_at - presence.last_seen_at).total_seconds()
+    if gap_seconds > max(15, zone.dwell_seconds / 2):
+        presence.first_outside_at = observed_at
+        presence.incident_created = False
+    presence.last_seen_at = observed_at
+    elapsed = (observed_at - presence.first_outside_at).total_seconds()
+
+    if elapsed < zone.dwell_seconds or presence.incident_created:
+        db.commit()
         return None, False
 
     incident, created = upsert_equipment_incident(
@@ -44,11 +87,11 @@ def process_observation(db: Session, observation: EquipmentObservation) -> tuple
                 image_base64=observation.evidence_jpeg_base64,
             )
         except ValueError:
-            # Keep the incident even if an invalid evidence frame was supplied.
             incident.evidence_path = None
-        db.commit()
-        db.refresh(incident)
 
+    presence.incident_created = True
+    db.commit()
+    db.refresh(incident)
     if created:
         notifications.send_incident(incident)
         incident.notification_count += 1
