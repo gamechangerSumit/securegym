@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.observation_routes import router as observation_router
 from app.api.routes import router
 from app.core.config import get_settings
 from app.core.database import Base, engine
@@ -39,3 +40,4 @@ def health():
 
 
 app.include_router(router, prefix=settings.api_prefix)
+app.include_router(observation_router, prefix=settings.api_prefix, tags=["vision-ingest"])
