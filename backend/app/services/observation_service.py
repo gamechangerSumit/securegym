@@ -35,10 +35,25 @@ def process_observation(db: Session, observation: EquipmentObservation) -> tuple
     observed_at = datetime.fromtimestamp(observation.observed_at_epoch, tz=timezone.utc)
 
     if not observation.outside_storage:
+        active_query = select(Incident).where(
+            Incident.camera_id == camera.id,
+            Incident.zone_id == zone.id,
+            Incident.equipment_class == observation.equipment_class,
+            Incident.status.in_(["open", "acknowledged"]),
+        )
+        if observation.track_id is None:
+            active_query = active_query.where(Incident.track_id.is_(None))
+        else:
+            active_query = active_query.where(Incident.track_id == observation.track_id)
+        active_incident = db.scalar(active_query.order_by(Incident.id.desc()).limit(1))
+        if active_incident:
+            active_incident.status = "resolved"
+            active_incident.resolved_at = observed_at
+            active_incident.resolution_note = "Vision system observed equipment returned to storage zone"
         if presence:
             db.delete(presence)
-            db.commit()
-        return None, False
+        db.commit()
+        return active_incident, False
 
     if observation.confidence < zone.confidence_threshold:
         return None, False
@@ -59,7 +74,6 @@ def process_observation(db: Session, observation: EquipmentObservation) -> tuple
         db.refresh(presence)
         return None, False
 
-    # A long gap means the track was not continuously observed; restart its dwell clock.
     gap_seconds = (observed_at - presence.last_seen_at).total_seconds()
     if gap_seconds > max(15, zone.dwell_seconds / 2):
         presence.first_outside_at = observed_at
