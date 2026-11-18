@@ -34,7 +34,7 @@ class Zone(Base):
     zone_type: Mapped[str] = mapped_column(String(24))
     polygon: Mapped[list] = mapped_column(JSON)
     equipment_classes: Mapped[list] = mapped_column(JSON, default=list)
-    dwell_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    dwell_seconds: Mapped[int] = mapped_column(Integer, default=300)
     confidence_threshold: Mapped[float] = mapped_column(Float, default=0.45)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
